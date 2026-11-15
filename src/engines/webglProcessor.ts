@@ -485,6 +485,7 @@ export class WebGLRestorationPipeline {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0)
     const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+    gl.bindTexture(gl.TEXTURE_2D, null)
     if (status !== gl.FRAMEBUFFER_COMPLETE) {
       throw new Error(`Framebuffer WebGL2 tidak lengkap (${status})`)
     }
@@ -533,6 +534,8 @@ export class WebGLRestorationPipeline {
 
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.midFbo)
       gl.viewport(0, 0, srcWidth, srcHeight)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, this.srcTex)
       gl.useProgram(this.deburikProgram)
       gl.uniform1i(this.deburikLocs.uTex, 0)
       gl.uniform1f(this.deburikLocs.uFlipY, 0.0)
@@ -544,17 +547,18 @@ export class WebGLRestorationPipeline {
     }
 
     // Pass 2: Edge-Adaptive Directional Super-Resolution (EASU 12-tap + anti-ringing)
-    gl.bindTexture(gl.TEXTURE_2D, upscaleInputTex)
-    gl.useProgram(this.easuProgram)
-    gl.uniform1i(this.easuLocs.uTex, 0)
-    gl.uniform2f(this.easuLocs.uSrcSize, srcWidth, srcHeight)
-    gl.uniform2f(this.easuLocs.uSrcInvSize, 1 / srcWidth, 1 / srcHeight)
-
     if (!needsRcas) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null)
       gl.viewport(0, 0, dstWidth, dstHeight)
+      gl.activeTexture(gl.TEXTURE0)
+      gl.bindTexture(gl.TEXTURE_2D, upscaleInputTex)
+      gl.useProgram(this.easuProgram)
+      gl.uniform1i(this.easuLocs.uTex, 0)
+      gl.uniform2f(this.easuLocs.uSrcSize, srcWidth, srcHeight)
+      gl.uniform2f(this.easuLocs.uSrcInvSize, 1 / srcWidth, 1 / srcHeight)
       gl.uniform1f(this.easuLocs.uFlipY, 1.0)
       gl.drawArrays(gl.TRIANGLES, 0, 6)
+      gl.bindTexture(gl.TEXTURE_2D, null)
       return
     }
 
@@ -571,12 +575,19 @@ export class WebGLRestorationPipeline {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.dstFbo)
     gl.viewport(0, 0, dstWidth, dstHeight)
+    gl.activeTexture(gl.TEXTURE0)
+    gl.bindTexture(gl.TEXTURE_2D, upscaleInputTex)
+    gl.useProgram(this.easuProgram)
+    gl.uniform1i(this.easuLocs.uTex, 0)
+    gl.uniform2f(this.easuLocs.uSrcSize, srcWidth, srcHeight)
+    gl.uniform2f(this.easuLocs.uSrcInvSize, 1 / srcWidth, 1 / srcHeight)
     gl.uniform1f(this.easuLocs.uFlipY, 0.0)
     gl.drawArrays(gl.TRIANGLES, 0, 6)
 
     // Pass 3: RCAS Contrast-Adaptive Sharpening + Clarity -> Canvas
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
     gl.viewport(0, 0, dstWidth, dstHeight)
+    gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.dstTex)
     gl.useProgram(this.rcasProgram)
     gl.uniform1i(this.rcasLocs.uTex, 0)
@@ -585,6 +596,7 @@ export class WebGLRestorationPipeline {
     gl.uniform1f(this.rcasLocs.uSharpen, params.sharpen / 100)
     gl.uniform1f(this.rcasLocs.uClarity, params.clarity / 100)
     gl.drawArrays(gl.TRIANGLES, 0, 6)
+    gl.bindTexture(gl.TEXTURE_2D, null)
   }
 
   dispose(): void {

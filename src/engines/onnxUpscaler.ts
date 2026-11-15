@@ -164,6 +164,7 @@ interface WorkerInferenceArgs {
   tileOffset: number
   tileStride: number
   suppressTileProgress?: boolean
+  forceSingleThread?: boolean
   outCanvas: HTMLCanvasElement
   getOutCtx: (totalW: number, totalH: number) => CanvasRenderingContext2D
   onProgress?: (p: ProgressInfo) => void
@@ -227,9 +228,8 @@ function runWorkerInference(
       }
       if (msg.type === 'error') {
         cleanup()
-        if (!args.modelBuffer) {
-          slot.loadedModelKey = ''
-        }
+        // Reset the worker so a failed ORT/initWasm() state never poisons future runs
+        resetWorkerSlot(args.slotIndex)
         reject(new Error(msg.message))
       }
     }
@@ -248,6 +248,7 @@ function runWorkerInference(
       tileOffset: args.tileOffset,
       tileStride: args.tileStride,
       suppressTileProgress: args.suppressTileProgress,
+      forceSingleThread: args.forceSingleThread,
     }
     const transfers: Transferable[] = [args.srcRgba]
     if (args.modelBuffer) {
@@ -332,16 +333,21 @@ export async function upscaleImageWithOnnx(
     canUseDualWasmPool &&
     ((modelBuffer ? modelBuffer.byteLength : knownModelSize) <= 25_000_000)
 
-  const srcCanvas = document.createElement('canvas')
-  srcCanvas.width = srcW
-  srcCanvas.height = srcH
-  const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true })
-  if (!srcCtx) throw new Error('Gagal membuat canvas sumber')
-  srcCtx.drawImage(bitmap, 0, 0)
-  const srcImgData = srcCtx.getImageData(0, 0, srcW, srcH)
-  // Release source canvas memory immediately (critical on mobile)
-  srcCanvas.width = 0
-  srcCanvas.height = 0
+  const extractBitmapRgba = (): ImageData => {
+    const srcCanvas = document.createElement('canvas')
+    srcCanvas.width = srcW
+    srcCanvas.height = srcH
+    const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true })
+    if (!srcCtx) throw new Error('Gagal membuat canvas sumber')
+    srcCtx.drawImage(bitmap, 0, 0)
+    const imgData = srcCtx.getImageData(0, 0, srcW, srcH)
+    // Release source canvas memory immediately (critical on mobile)
+    srcCanvas.width = 0
+    srcCanvas.height = 0
+    return imgData
+  }
+
+  const srcImgData = extractBitmapRgba()
 
   const outCanvas = document.createElement('canvas')
   let outCtx: CanvasRenderingContext2D | null = null
@@ -407,25 +413,57 @@ export async function upscaleImageWithOnnx(
       ])
       doneInfo = res0
     } else {
-      doneInfo = await runWorkerInference({
-        slotIndex: 0,
-        modelKey,
-        modelBuffer: needSlot0Buffer ? modelBuffer : undefined,
-        srcRgba: srcImgData.data.buffer,
-        srcW,
-        srcH,
-        tileSize,
-        preferWebGPU: canUseWebGpu,
-        isMobile,
-        fallbackScale: modelSpec.scale,
-        wasmBaseUrl,
-        tileOffset: 0,
-        tileStride: 1,
-        outCanvas,
-        getOutCtx,
-        onProgress,
-        signal,
-      })
+      try {
+        doneInfo = await runWorkerInference({
+          slotIndex: 0,
+          modelKey,
+          modelBuffer: needSlot0Buffer ? modelBuffer : undefined,
+          srcRgba: srcImgData.data.buffer,
+          srcW,
+          srcH,
+          tileSize,
+          preferWebGPU: canUseWebGpu,
+          isMobile,
+          fallbackScale: modelSpec.scale,
+          wasmBaseUrl,
+          tileOffset: 0,
+          tileStride: 1,
+          outCanvas,
+          getOutCtx,
+          onProgress,
+          signal,
+        })
+      } catch (err) {
+        if (!isCrossOriginIsolated || signal?.aborted) {
+          throw err
+        }
+        // Fallback to single-thread WASM on a fresh worker if cross-origin pthread init was blocked/timed out
+        resetAllWorkers()
+        const retryModelBuffer = customModelFile
+          ? await customModelFile.arrayBuffer()
+          : await fetchModelBuffer(modelSpec.url, onProgress, signal)
+        const retryImgData = extractBitmapRgba()
+        doneInfo = await runWorkerInference({
+          slotIndex: 0,
+          modelKey,
+          modelBuffer: retryModelBuffer,
+          srcRgba: retryImgData.data.buffer,
+          srcW,
+          srcH,
+          tileSize,
+          preferWebGPU: false,
+          isMobile,
+          fallbackScale: modelSpec.scale,
+          wasmBaseUrl,
+          tileOffset: 0,
+          tileStride: 1,
+          forceSingleThread: true,
+          outCanvas,
+          getOutCtx,
+          onProgress,
+          signal,
+        })
+      }
     }
 
     onProgress?.({ percent: 96, stage: 'Menyimpan hasil HD...' })

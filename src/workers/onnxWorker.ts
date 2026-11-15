@@ -16,6 +16,7 @@ export interface OnnxWorkerRequest {
   tileOffset?: number
   tileStride?: number
   suppressTileProgress?: boolean
+  forceSingleThread?: boolean
 }
 
 export type OnnxWorkerMessage =
@@ -138,12 +139,61 @@ function analyzeTensorStats(arr: ArrayLike<number>): { max: number; nanCount: nu
   return { max, nanCount }
 }
 
+const WASM_INIT_TIMEOUT_MS = 15_000
+const SESSION_CREATE_TIMEOUT_MS = 20_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} melebihi batas waktu (${Math.round(ms / 1000)} dtk)`))
+    }, ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+async function createWasmSession(
+  ort: OrtModule,
+  modelBytes: Uint8Array,
+  wasmBaseUrl: string,
+  threads: number
+): Promise<OrtTypes.InferenceSession> {
+  const opts: OrtTypes.InferenceSession.SessionOptions = {
+    executionProviders: ['wasm'],
+    graphOptimizationLevel: 'all',
+    enableCpuMemArena: true,
+    enableMemPattern: true,
+    executionMode: 'sequential',
+  }
+
+  ort.env.wasm.wasmPaths = wasmBaseUrl
+  ort.env.wasm.simd = true
+  ort.env.wasm.proxy = false
+  ort.env.wasm.initTimeout = WASM_INIT_TIMEOUT_MS
+  ort.env.wasm.numThreads = threads
+
+  return withTimeout(
+    ort.InferenceSession.create(modelBytes, opts),
+    SESSION_CREATE_TIMEOUT_MS,
+    `Kompilasi WASM (${threads}T)`
+  )
+}
+
 async function getSession(
   modelKey: string,
   modelBuffer: ArrayBuffer | undefined,
   preferWebGPU: boolean,
   isMobile: boolean,
-  wasmBaseUrl: string
+  wasmBaseUrl: string,
+  forceSingleThread = false
 ): Promise<{ ort: OrtModule; session: OrtTypes.InferenceSession; provider: string }> {
   if (modelBuffer) {
     cachedModelBytes = new Uint8Array(modelBuffer)
@@ -156,9 +206,9 @@ async function getSession(
     typeof navigator !== 'undefined' &&
     'gpu' in navigator
 
-  const ort = await loadOrtModule(hasGpu)
+  let ort = await loadOrtModule(hasGpu)
 
-  const supportsThreads = Boolean(workerCtx.crossOriginIsolated)
+  const supportsThreads = Boolean(workerCtx.crossOriginIsolated) && !forceSingleThread
   const hwCores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 4 : 4
   const wasmThreads = supportsThreads ? Math.min(isMobile ? 2 : 4, Math.max(1, hwCores)) : 1
 
@@ -175,6 +225,7 @@ async function getSession(
   ort.env.wasm.numThreads = wasmThreads
   ort.env.wasm.simd = true
   ort.env.wasm.proxy = false
+  ort.env.wasm.initTimeout = WASM_INIT_TIMEOUT_MS
 
   if (cachedSession) {
     await cachedSession.release().catch(() => undefined)
@@ -182,43 +233,41 @@ async function getSession(
     cachedKey = ''
   }
 
-  const wasmSessionOpts: OrtTypes.InferenceSession.SessionOptions = {
-    executionProviders: ['wasm'],
-    graphOptimizationLevel: 'all',
-    enableCpuMemArena: true,
-    enableMemPattern: true,
-    executionMode: 'sequential',
-  }
-
   let session: OrtTypes.InferenceSession
-  let provider = supportsThreads && wasmThreads > 1 ? `WASM ${wasmThreads}T` : 'WASM'
+  let provider = wasmThreads > 1 ? `WASM ${wasmThreads}T` : 'WASM'
+  let resolvedKey = effectiveKey
 
   if (hasGpu) {
     try {
-      session = await ort.InferenceSession.create(cachedModelBytes, {
-        executionProviders: [
-          {
-            name: 'webgpu',
-            preferredLayout: 'NCHW',
-            // Keep Clip clamp on CPU so JSEP WebGPU never fails on NHWC/large final Clip output tensors
-            forceCpuNodeNames: ['/Clip', 'Clip'],
-          },
-          'wasm',
-        ],
-        graphOptimizationLevel: 'all',
-      })
+      session = await withTimeout(
+        ort.InferenceSession.create(cachedModelBytes, {
+          executionProviders: [
+            {
+              name: 'webgpu',
+              preferredLayout: 'NCHW',
+              // Keep Clip clamp on CPU so JSEP WebGPU never fails on NHWC/large final Clip output tensors
+              forceCpuNodeNames: ['/Clip', 'Clip'],
+            },
+            'wasm',
+          ],
+          graphOptimizationLevel: 'all',
+        }),
+        SESSION_CREATE_TIMEOUT_MS,
+        'Kompilasi WebGPU'
+      )
       provider = 'WebGPU'
     } catch {
       webGpuFailedModels.add(modelKey)
-      session = await ort.InferenceSession.create(cachedModelBytes, wasmSessionOpts)
-      provider = supportsThreads && wasmThreads > 1 ? `WASM ${wasmThreads}T` : 'WASM'
+      ort = await loadOrtModule(false)
+      session = await createWasmSession(ort, cachedModelBytes, wasmBaseUrl, wasmThreads)
+      resolvedKey = `${modelKey}:wasm-t${wasmThreads}`
     }
   } else {
-    session = await ort.InferenceSession.create(cachedModelBytes, wasmSessionOpts)
+    session = await createWasmSession(ort, cachedModelBytes, wasmBaseUrl, wasmThreads)
   }
 
   cachedSession = session
-  cachedKey = effectiveKey
+  cachedKey = resolvedKey
   cachedProvider = provider
   return { ort, session, provider }
 }
@@ -250,7 +299,8 @@ if (!workerCtx.name?.startsWith('em-pthread')) {
         req.modelBuffer,
         req.preferWebGPU,
         isMobile,
-        req.wasmBaseUrl
+        req.wasmBaseUrl,
+        Boolean(req.forceSingleThread)
       )
 
       const inputName = session.inputNames[0]

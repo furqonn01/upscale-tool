@@ -23,6 +23,9 @@ function attachOrtMiddleware(middlewares: Connect.Server, ortDist: string): void
     } else if (cleanUrl.endsWith('.mjs') || cleanUrl.endsWith('.js')) {
       res.setHeader('Content-Type', 'application/javascript')
     }
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless')
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
     fs.createReadStream(filePath).pipe(res)
   })
 }
@@ -105,8 +108,22 @@ function onnxRuntimeAssetsPlugin(): Plugin {
   }
 }
 
+const ortDistDir = path.resolve(import.meta.dirname, 'node_modules/onnxruntime-web/dist')
+
 export default defineConfig({
   plugins: [react(), tailwindcss(), onnxRuntimeAssetsPlugin()],
+  resolve: {
+    alias: [
+      {
+        find: 'onnxruntime-web/wasm',
+        replacement: path.join(ortDistDir, 'ort.wasm.min.mjs'),
+      },
+      {
+        find: /^onnxruntime-web$/,
+        replacement: path.join(ortDistDir, 'ort.min.mjs'),
+      },
+    ],
+  },
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
