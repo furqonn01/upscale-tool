@@ -1,0 +1,17 @@
+{
+  "name": "HD Local Studio",
+  "short_name": "HD Studio",
+  "description": "Upscale foto & video burik jadi HD secara lokal tanpa upload server, plus AI Generator BYOK (9Router, Agnes 3.5, Gemini).",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
