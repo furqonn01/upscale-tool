@@ -19,6 +19,7 @@ import type {
 } from '../types'
 import { formatBytes } from '../utils/device'
 import { saveGalleryItem } from '../utils/storage'
+import { YouTubeVideoPlayer } from './YouTubeVideoPlayer'
 
 interface VideoUpscalerTabProps {
   caps: DeviceCapabilities
@@ -75,6 +76,7 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
   const [processing, setProcessing] = useState(false)
   const [progress, setProgress] = useState<ProgressInfo | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [theaterMode, setTheaterMode] = useState(false)
 
   const [options, setOptions] = useState<VideoUpscaleOptions>(() => ({
     scale: caps.isMobile ? 1.5 : 2,
@@ -219,7 +221,7 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
       {/* Preview Panel */}
-      <div className="space-y-4 lg:col-span-7">
+      <div className={`space-y-4 ${theaterMode && sourceUrl ? 'lg:col-span-12' : 'lg:col-span-7'}`}>
         {!sourceUrl ? (
           <div
             onDragOver={(e) => e.preventDefault()}
@@ -249,45 +251,36 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
-                <div className="border-b border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-400">
-                  Video Asli {sourceMeta ? `(${sourceMeta.w}×${sourceMeta.h})` : ''}
-                </div>
-                <video
-                  src={sourceUrl}
-                  controls
-                  playsInline
-                  className="max-h-[42dvh] w-full bg-black object-contain"
-                />
-              </div>
-
-              <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
-                <div className="border-b border-zinc-800 px-3 py-1.5 text-xs font-medium text-emerald-300">
-                  {processing
-                    ? 'Live Frame Restorasi HD...'
-                    : resultUrl
-                      ? `Hasil HD (${targetDims?.width}×${targetDims?.height})`
-                      : 'Preview Hasil HD'}
-                </div>
-                {processing ? (
+            <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-black shadow-xl">
+              {processing ? (
+                <div className="relative flex aspect-video w-full items-center justify-center bg-black">
                   <canvas
                     ref={previewCanvasRef}
-                    className="max-h-[42dvh] w-full bg-black object-contain"
+                    className="h-full w-full object-contain"
                   />
-                ) : resultUrl ? (
-                  <video
-                    src={resultUrl}
-                    controls
-                    playsInline
-                    className="max-h-[42dvh] w-full bg-black object-contain"
-                  />
-                ) : (
-                  <div className="flex h-48 items-center justify-center p-4 text-center text-xs text-zinc-500">
-                    Tekan tombol &ldquo;Proses Video HD&rdquo; untuk memulai restorasi frame GPU.
+                  <div className="pointer-events-none absolute top-3 left-3 inline-flex items-center gap-1.5 rounded-full bg-black/75 px-3 py-1 text-xs font-medium text-emerald-300 backdrop-blur-sm">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                    Live Frame Restorasi HD...
                   </div>
-                )}
-              </div>
+                </div>
+              ) : (
+                <YouTubeVideoPlayer
+                  src={resultUrl || sourceUrl}
+                  compareSrc={resultUrl ? sourceUrl : undefined}
+                  mainLabel={targetDims ? `Hasil HD (${targetDims.height}p)` : 'Hasil HD'}
+                  compareLabel={sourceMeta ? `Asli (${sourceMeta.h}p)` : 'Asli'}
+                  title={sourceFile?.name}
+                  qualityBadge={
+                    resultUrl && targetDims
+                      ? `${targetDims.height}p HD`
+                      : sourceMeta
+                        ? `${sourceMeta.h}p Asli`
+                        : undefined
+                  }
+                  theaterMode={theaterMode}
+                  onToggleTheater={() => setTheaterMode((v) => !v)}
+                />
+              )}
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/70 px-3.5 py-2.5 text-xs">
@@ -304,6 +297,9 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
                     {resultInfo}
                   </span>
                 )}
+                <span className="hidden text-[11px] text-zinc-500 sm:inline">
+                  Spasi/K: Putar • J/L: ±10s • M: Mute • T: Teater • F: Fullscreen
+                </span>
               </div>
 
               <div className="flex items-center gap-2">
@@ -343,7 +339,7 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
       </div>
 
       {/* Controls */}
-      <div className="space-y-4 lg:col-span-5">
+      <div className={`space-y-4 ${theaterMode && sourceUrl ? 'lg:col-span-12' : 'lg:col-span-5'}`}>
         <div className="space-y-4 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
           {/* Presets */}
           <div>

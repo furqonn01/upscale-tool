@@ -3,6 +3,7 @@ import { ArrowUpRight, Download, FolderHeart, Trash2 } from 'lucide-react'
 import type { GalleryItem } from '../types'
 import { formatBytes } from '../utils/device'
 import { clearGalleryItems, deleteGalleryItem, listGalleryItems } from '../utils/storage'
+import { YouTubeVideoPlayer } from './YouTubeVideoPlayer'
 
 interface GalleryTabProps {
   refreshSignal: number
@@ -134,11 +135,10 @@ export function GalleryTab({ refreshSignal, onSendToUpscaler }: GalleryTabProps)
             >
               <div className="aspect-video bg-zinc-950 checkerboard-bg overflow-hidden">
                 {item.kind === 'upscale-video' ? (
-                  <video
+                  <YouTubeVideoPlayer
                     src={item.objectUrl}
-                    controls
-                    playsInline
-                    className="h-full w-full bg-black object-contain"
+                    qualityBadge={item.height ? `${item.height}p HD` : undefined}
+                    compact
                   />
                 ) : (
                   <img
