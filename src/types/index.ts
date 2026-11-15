@@ -41,6 +41,7 @@ export interface OnnxModelSpec {
   sizeLabel: string
   bestFor: string
   url: string
+  localPath?: string
   isFp16?: boolean
   inputOrder?: 'nchw'
   valueRange?: '0_1' | 'neg1_1'

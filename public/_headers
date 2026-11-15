@@ -1,0 +1,20 @@
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+
+/ort/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+  Cross-Origin-Resource-Policy: same-origin
+  Cache-Control: public, max-age=31536000, immutable
+
+/ort/*.wasm
+  Content-Type: application/wasm
+
+/ort/*.mjs
+  Content-Type: application/javascript; charset=utf-8
+
+/models/*
+  Cross-Origin-Resource-Policy: same-origin
+  Content-Type: application/octet-stream
+  Cache-Control: public, max-age=31536000, immutable

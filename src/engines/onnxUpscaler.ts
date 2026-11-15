@@ -3,42 +3,39 @@ import type { OnnxWorkerMessage, OnnxWorkerRequest } from '../workers/onnxWorker
 import { MODEL_CACHE_NAME } from './onnxModels'
 import { canvasToBlob } from './webglProcessor'
 
-async function fetchModelBuffer(
-  url: string,
+function looksLikeHtml(bytes: Uint8Array): boolean {
+  const probeLen = Math.min(bytes.length, 64)
+  let i = 0
+  while (i < probeLen && (bytes[i] === 0x20 || bytes[i] === 0x09 || bytes[i] === 0x0d || bytes[i] === 0x0a)) {
+    i++
+  }
+  return i < probeLen && bytes[i] === 0x3c // '<'
+}
+
+async function fetchModelFromUrl(
+  candidateUrl: string,
+  cacheKeyUrl: string,
   onProgress?: (p: ProgressInfo) => void,
   signal?: AbortSignal
 ): Promise<ArrayBuffer> {
-  if (typeof caches !== 'undefined') {
-    try {
-      const cache = await caches.open(MODEL_CACHE_NAME)
-      const cached = await cache.match(url)
-      if (cached) {
-        onProgress?.({
-          percent: 14,
-          stage: 'Memuat model AI dari cache lokal...',
-        })
-        return await cached.arrayBuffer()
-      }
-    } catch {
-      // Cache unavailable; proceed with network fetch
-    }
+  const response = await fetch(candidateUrl, { signal, mode: 'cors', credentials: 'omit' })
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`)
   }
 
-  onProgress?.({
-    percent: 2,
-    stage: 'Mengunduh model AI ke perangkat (sekali saja)...',
-    detail: 'Setelah selesai, model tersimpan lokal untuk pemakaian offline',
-  })
-
-  const response = await fetch(url, { signal })
-  if (!response.ok) {
-    throw new Error(`Gagal mengunduh model AI (HTTP ${response.status})`)
+  const contentType = (response.headers.get('content-type') || '').toLowerCase()
+  if (contentType.includes('text/html')) {
+    throw new Error('Server mengembalikan HTML, bukan file model ONNX')
   }
 
   const total = Number(response.headers.get('content-length') || 0)
   if (!response.body) {
     const buf = await response.arrayBuffer()
-    await saveBufferToCache(url, buf)
+    const bytes = new Uint8Array(buf)
+    if (bytes.byteLength < 10_000 || looksLikeHtml(bytes)) {
+      throw new Error('File model tidak valid atau terpotong')
+    }
+    await saveBufferToCache(cacheKeyUrl, buf)
     return buf
   }
 
@@ -76,8 +73,69 @@ async function fetchModelBuffer(
     offset += chunk.byteLength
   }
 
-  await saveBufferToCache(url, merged.buffer)
+  if (merged.byteLength < 10_000 || looksLikeHtml(merged)) {
+    throw new Error('File model tidak valid atau terpotong')
+  }
+
+  await saveBufferToCache(cacheKeyUrl, merged.buffer)
   return merged.buffer
+}
+
+async function fetchModelBuffer(
+  modelSpec: OnnxModelSpec,
+  onProgress?: (p: ProgressInfo) => void,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> {
+  if (typeof caches !== 'undefined') {
+    try {
+      const cache = await caches.open(MODEL_CACHE_NAME)
+      const cached = await cache.match(modelSpec.url)
+      if (cached) {
+        const buf = await cached.arrayBuffer()
+        if (buf.byteLength >= 10_000 && !looksLikeHtml(new Uint8Array(buf))) {
+          onProgress?.({
+            percent: 14,
+            stage: 'Memuat model AI dari cache lokal...',
+          })
+          return buf
+        }
+        await cache.delete(modelSpec.url)
+      }
+    } catch {
+      // Cache unavailable; proceed with network fetch
+    }
+  }
+
+  onProgress?.({
+    percent: 2,
+    stage: 'Mengunduh model AI ke perangkat (sekali saja)...',
+    detail: 'Setelah selesai, model tersimpan lokal untuk pemakaian offline',
+  })
+
+  const candidates: string[] = []
+  if (modelSpec.localPath && typeof window !== 'undefined') {
+    const localUrl = new URL(`${import.meta.env.BASE_URL}${modelSpec.localPath}`, window.location.origin).href
+    candidates.push(localUrl)
+  }
+  candidates.push(modelSpec.url)
+
+  let lastError: unknown = null
+  for (const candidateUrl of candidates) {
+    if (signal?.aborted) throw new DOMException('Dibatalkan', 'AbortError')
+    try {
+      return await fetchModelFromUrl(candidateUrl, modelSpec.url, onProgress, signal)
+    } catch (err) {
+      if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        throw err
+      }
+      lastError = err
+    }
+  }
+
+  const reason = lastError instanceof Error ? lastError.message : 'Koneksi gagal'
+  throw new Error(
+    `Gagal mengunduh model AI (${reason}). Gunakan Instant HD GPU (0 MB) atau muat file .onnx lokal.`
+  )
 }
 
 async function saveBufferToCache(url: string, buffer: ArrayBuffer): Promise<void> {
@@ -322,7 +380,7 @@ export async function upscaleImageWithOnnx(
       onProgress?.({ percent: 8, stage: `Membaca model lokal ${customModelFile.name}...` })
       modelBuffer = await customModelFile.arrayBuffer()
     } else {
-      modelBuffer = await fetchModelBuffer(modelSpec.url, onProgress, signal)
+      modelBuffer = await fetchModelBuffer(modelSpec, onProgress, signal)
     }
     if (signal?.aborted) throw new DOMException('Dibatalkan', 'AbortError')
   } else {
@@ -441,7 +499,7 @@ export async function upscaleImageWithOnnx(
         resetAllWorkers()
         const retryModelBuffer = customModelFile
           ? await customModelFile.arrayBuffer()
-          : await fetchModelBuffer(modelSpec.url, onProgress, signal)
+          : await fetchModelBuffer(modelSpec, onProgress, signal)
         const retryImgData = extractBitmapRgba()
         doneInfo = await runWorkerInference({
           slotIndex: 0,
