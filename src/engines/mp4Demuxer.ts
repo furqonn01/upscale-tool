@@ -383,11 +383,19 @@ export async function parseMp4File(file: File): Promise<ParsedMp4 | null> {
   if (headBuf.byteLength < 12) return null
   const headView = new DataView(headBuf)
   const firstType = readAscii(headView, 4, 4)
-  if (firstType !== 'ftyp' && firstType !== 'moov' && firstType !== 'free' && firstType !== 'wide') {
+  if (
+    firstType !== 'ftyp' &&
+    firstType !== 'moov' &&
+    firstType !== 'free' &&
+    firstType !== 'wide' &&
+    firstType !== 'skip' &&
+    firstType !== 'mdat'
+  ) {
     return null
   }
 
   let moovBuf: ArrayBuffer | null = null
+  let moovHeaderSize = 8
   let pos = 0
   while (pos + 8 <= file.size) {
     const hdrBuf = await file.slice(pos, Math.min(pos + 16, file.size)).arrayBuffer()
@@ -409,6 +417,7 @@ export async function parseMp4File(file: File): Promise<ParsedMp4 | null> {
       // Cap moov read at 64MB to avoid pathological files
       if (size > 64 * 1024 * 1024) return null
       moovBuf = await file.slice(pos, pos + size).arrayBuffer()
+      moovHeaderSize = headerSize
       break
     }
     pos += size
@@ -418,7 +427,7 @@ export async function parseMp4File(file: File): Promise<ParsedMp4 | null> {
 
   const view = new DataView(moovBuf)
   const rawBytes = new Uint8Array(moovBuf)
-  const moovBoxes = iterBoxes(view, 8, moovBuf.byteLength)
+  const moovBoxes = iterBoxes(view, moovHeaderSize, moovBuf.byteLength)
 
   let mvhdTimescale = 1000
   let mvhdDurationSec = 0
@@ -558,7 +567,7 @@ export async function parseMp4File(file: File): Promise<ParsedMp4 | null> {
     } else if (handlerType === 'soun' && !rawAudio && entryType === 'mp4a') {
       const version = view.getUint16(entryStart + 16)
       const channels = view.getUint16(entryStart + 24)
-      const sampleRate = view.getUint16(entryStart + 32)
+      const sampleRate = Math.round(view.getUint32(entryStart + 32) / 65536) || view.getUint16(entryStart + 32)
       const extraOffset = version === 1 ? 16 : version === 2 ? 36 : 0
       const childStart = entryStart + 36 + extraOffset
       const childBoxes = iterBoxes(view, childStart, entryEnd)
@@ -574,7 +583,7 @@ export async function parseMp4File(file: File): Promise<ParsedMp4 | null> {
       if (esdsBox) {
         const esdsBytes = rawBytes.slice(esdsBox.start + esdsBox.headerSize, esdsBox.end)
         const parsedEsds = parseEsdsDescriptor(esdsBytes)
-        if (parsedEsds && parsedEsds.objectType === 0x40) {
+        if (parsedEsds && (parsedEsds.objectType === 0x40 || parsedEsds.objectType === 0x67)) {
           const built = buildSamplesFromStbl(
             view,
             stbl,

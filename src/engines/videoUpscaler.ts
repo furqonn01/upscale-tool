@@ -373,6 +373,8 @@ export async function upscaleVideoLocally(
     sharpen: options.sharpen,
     clarity: options.clarity,
   }
+  onProgress?.({ percent: 1, stage: 'Membaca metadata & struktur video...' })
+  let fastPathNote: string | null = null
 
   // Fast Path: Demux MP4 -> VideoDecoder -> WebGL2 EASU+RCAS -> VideoEncoder -> mp4-muxer (+ raw AAC passthrough)
   if (
@@ -386,6 +388,8 @@ export async function upscaleVideoLocally(
         const vt = parsed.videoTrack
         const decCheck = await VideoDecoder.isConfigSupported({
           codec: vt.codec,
+          codedWidth: vt.width,
+          codedHeight: vt.height,
           description: vt.description,
         }).catch(() => ({ supported: false }))
 
@@ -434,13 +438,20 @@ export async function upscaleVideoLocally(
                 signal,
               })
             }
+            fastPathNote = 'Audio tidak dapat diproses pada jalur cepat MP4'
+          } else {
+            fastPathNote = `Encoder H.264 WebCodecs tidak mendukung ${encDstW}×${encDstH}`
           }
+        } else {
+          fastPathNote = `VideoDecoder tidak mendukung codec ${vt.codec}`
         }
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         throw err
       }
+      fastPathNote = err instanceof Error ? err.message : String(err)
+      console.warn('[videoUpscaler] Demux MP4 fallback ke <video>:', fastPathNote)
       // Fall through cleanly to <video> WebCodecs / MediaRecorder for non-MP4 or exotic streams
     }
   }
@@ -454,8 +465,37 @@ export async function upscaleVideoLocally(
 
   try {
     await new Promise<void>((resolve, reject) => {
-      video.onloadedmetadata = () => resolve()
-      video.onerror = () => reject(new Error('Format video tidak didukung oleh browser ini'))
+      if (video.readyState >= 1) {
+        resolve()
+        return
+      }
+      const timer = setTimeout(() => {
+        cleanup()
+        const extra = fastPathNote ? ` (${fastPathNote})` : ''
+        reject(new Error(`Metadata video tidak terbaca oleh browser dalam 10 detik${extra}`))
+      }, 10000)
+      const onMeta = () => {
+        cleanup()
+        resolve()
+      }
+      const onErr = () => {
+        cleanup()
+        const extra = fastPathNote ? ` (${fastPathNote})` : ''
+        reject(new Error(`Format video tidak didukung oleh browser ini${extra}`))
+      }
+      const onAbort = () => {
+        cleanup()
+        reject(new DOMException('Dibatalkan', 'AbortError'))
+      }
+      const cleanup = () => {
+        clearTimeout(timer)
+        video.removeEventListener('loadedmetadata', onMeta)
+        video.removeEventListener('error', onErr)
+        signal?.removeEventListener('abort', onAbort)
+      }
+      video.addEventListener('loadedmetadata', onMeta)
+      video.addEventListener('error', onErr)
+      signal?.addEventListener('abort', onAbort, { once: true })
     })
 
     const srcW = video.videoWidth
@@ -863,6 +903,12 @@ async function runDemuxedMp4WebCodecsPipeline(
       codedHeight: videoTrack.height,
       description: videoTrack.description,
       hardwareAcceleration: swDecCheck.supported ? 'prefer-software' : 'no-preference',
+    })
+
+    onProgress?.({
+      percent: 2,
+      stage: `Menyiapkan dekoder & GPU WebGL2 (${totalSamples} frame)...`,
+      detail: `${uprightSrcW}×${uprightSrcH} → ${uprightDstW}×${uprightDstH} • ${outputFps} fps`,
     })
 
     for (let i = 0; i < totalSamples; i++) {

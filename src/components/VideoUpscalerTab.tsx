@@ -9,6 +9,7 @@ import {
   Wand2,
   X,
 } from 'lucide-react'
+import { parseMp4File } from '../engines/mp4Demuxer'
 import { computeTargetVideoSize, upscaleVideoLocally } from '../engines/videoUpscaler'
 import type {
   DeviceCapabilities,
@@ -105,7 +106,7 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
 
   const handleVideoFile = (file: File | undefined) => {
     if (!file) return
-    if (!file.type.startsWith('video/')) {
+    if (!file.type.startsWith('video/') && !/\.(mp4|m4v|mov|webm|mkv)$/i.test(file.name)) {
       setErrorMsg('Pilih file video (MP4, MOV, WebM, dll).')
       return
     }
@@ -113,13 +114,33 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
     setResultBlob(null)
     setResultInfo('')
     setResultUrl(null)
+    setSourceMeta(null)
     const nextUrl = URL.createObjectURL(file)
     setSourceFile(file)
     setSourceUrl(nextUrl)
 
+    let resolved = false
     const probe = document.createElement('video')
     probe.preload = 'metadata'
+    const fallbackToDemuxMeta = () => {
+      if (resolved) return
+      void parseMp4File(file).then((parsed) => {
+        if (resolved || !parsed?.videoTrack) return
+        const vt = parsed.videoTrack
+        const rotated = vt.rotation === 90 || vt.rotation === 270
+        resolved = true
+        setSourceMeta({
+          w: rotated ? vt.height : vt.width,
+          h: rotated ? vt.width : vt.height,
+          duration: parsed.durationSec || 0,
+        })
+      }).catch(() => undefined)
+    }
+    const metaTimer = setTimeout(fallbackToDemuxMeta, 400)
+
     probe.onloadedmetadata = () => {
+      resolved = true
+      clearTimeout(metaTimer)
       setSourceMeta({
         w: probe.videoWidth,
         h: probe.videoHeight,
@@ -127,6 +148,12 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
       })
       probe.removeAttribute('src')
       probe.load()
+    }
+    probe.onerror = () => {
+      clearTimeout(metaTimer)
+      probe.removeAttribute('src')
+      probe.load()
+      fallbackToDemuxMeta()
     }
     probe.src = nextUrl
   }
