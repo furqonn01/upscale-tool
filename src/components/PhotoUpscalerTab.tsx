@@ -553,7 +553,7 @@ export function PhotoUpscalerTab({
                   AI Neural (ONNX)
                 </span>
                 <span className="mt-1 text-[11px] opacity-80">
-                  Swin2SR / Real-ESRGAN lokal
+                  SPAN / Nomos / Real-ESRGAN lokal
                 </span>
               </button>
             </div>
