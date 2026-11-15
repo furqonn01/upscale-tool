@@ -42,6 +42,44 @@ const PRESET_CARDS: Array<{ id: RestorationPreset; label: string; desc: string }
   { id: 'sharp-text', label: 'Teks / Dokumen', desc: 'Tulisan & screenshot ekstra tajam' },
 ]
 
+function computeSafeSourceFit(
+  srcW: number,
+  srcH: number,
+  scale: number,
+  isMobile: boolean
+): { w: number; h: number; fitted: boolean } {
+  const maxDim = isMobile ? 4096 : 8192
+  const maxPixels = isMobile ? 16_000_000 : 48_000_000
+  const maxSrcDim = Math.floor(maxDim / scale)
+  const maxSrcPixels = Math.floor(maxPixels / (scale * scale))
+
+  let factor = 1
+  if (srcW > maxSrcDim) factor = Math.min(factor, maxSrcDim / srcW)
+  if (srcH > maxSrcDim) factor = Math.min(factor, maxSrcDim / srcH)
+  if (srcW * srcH > maxSrcPixels) {
+    factor = Math.min(factor, Math.sqrt(maxSrcPixels / (srcW * srcH)))
+  }
+
+  if (factor >= 0.999) {
+    return { w: srcW, h: srcH, fitted: false }
+  }
+  return {
+    w: Math.max(64, Math.floor(srcW * factor)),
+    h: Math.max(64, Math.floor(srcH * factor)),
+    fitted: true,
+  }
+}
+
+function getResolutionTierLabel(w: number, h: number): string {
+  const longSide = Math.max(w, h)
+  const shortSide = Math.min(w, h)
+  if (longSide >= 3840 || shortSide >= 2160) return '4K UHD'
+  if (longSide >= 2560 || shortSide >= 1440) return '2K QHD'
+  if (longSide >= 1920 || shortSide >= 1080) return 'Full HD'
+  if (longSide >= 1280 || shortSide >= 720) return 'HD'
+  return ''
+}
+
 export function PhotoUpscalerTab({
   caps,
   incomingImage,
@@ -65,6 +103,7 @@ export function PhotoUpscalerTab({
   const [progress, setProgress] = useState<ProgressInfo | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [cachedModelMap, setCachedModelMap] = useState<Record<string, boolean>>({})
+  const [autoFitSafe, setAutoFitSafe] = useState(true)
 
   const [options, setOptions] = useState<PhotoUpscaleOptions>(() => ({
     engine: 'instant-hd',
@@ -258,11 +297,34 @@ export function PhotoUpscalerTab({
     }
 
     try {
-      const bitmap = await createImageBitmap(sourceBlob)
+      const rawBitmap = await createImageBitmap(sourceBlob)
+      const activeScale =
+        options.engine === 'ai-onnx' && !options.customModelFile
+          ? activeOnnxModel.scale
+          : options.scale
+
+      const safeFit = autoFitSafe
+        ? computeSafeSourceFit(rawBitmap.width, rawBitmap.height, activeScale, caps.isMobile)
+        : { w: rawBitmap.width, h: rawBitmap.height, fitted: false }
+
+      let workingBitmap = rawBitmap
+      if (safeFit.fitted) {
+        setProgress({
+          percent: 7,
+          stage: `Menyesuaikan resolusi aman (${safeFit.w}×${safeFit.h})...`,
+        })
+        workingBitmap = await createImageBitmap(rawBitmap, {
+          resizeWidth: safeFit.w,
+          resizeHeight: safeFit.h,
+          resizeQuality: 'high',
+        })
+        rawBitmap.close()
+      }
+
       try {
         if (options.engine === 'instant-hd') {
           const result = await upscaleImageWithWebGL(
-            bitmap,
+            workingBitmap,
             options.scale,
             {
               denoise: options.denoise,
@@ -275,12 +337,12 @@ export function PhotoUpscalerTab({
             options.outputFormat,
             setProgress
           )
-          await saveResult(result.blob, result.width, result.height, 'WebGL2 GPU')
+          await saveResult(result.blob, result.width, result.height, 'Instant HD GPU (EASU+RCAS)')
         } else {
           setProgress({ percent: 8, stage: 'Memuat modul AI ONNX...' })
           const { upscaleImageWithOnnx } = await import('../engines/onnxUpscaler')
           const result = await upscaleImageWithOnnx(
-            bitmap,
+            workingBitmap,
             activeOnnxModel,
             options.customModelFile,
             options.tileSize,
@@ -299,7 +361,7 @@ export function PhotoUpscalerTab({
           )
         }
       } finally {
-        bitmap.close()
+        workingBitmap.close()
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
@@ -312,7 +374,7 @@ export function PhotoUpscalerTab({
       setProcessing(false)
       setProgress(null)
     }
-  }, [activeOnnxModel, caps.isMobile, caps.maxTextureSize, caps.webgpu, onGalleryUpdated, options, refreshModelCacheStatus, sourceBlob, sourceName])
+  }, [activeOnnxModel, autoFitSafe, caps.isMobile, caps.maxTextureSize, caps.webgpu, onGalleryUpdated, options, refreshModelCacheStatus, sourceBlob, sourceName])
 
   const downloadOutput = () => {
     if (!afterBlob || !afterUrl) return
@@ -333,9 +395,21 @@ export function PhotoUpscalerTab({
       ? activeOnnxModel.scale
       : options.scale
 
-  const predictedDims = sourceDims
-    ? `${sourceDims.w * effectiveScale} × ${sourceDims.h * effectiveScale}`
+  const predictedFit = sourceDims
+    ? autoFitSafe
+      ? computeSafeSourceFit(sourceDims.w, sourceDims.h, effectiveScale, caps.isMobile)
+      : { w: sourceDims.w, h: sourceDims.h, fitted: false }
     : null
+
+  const predictedOutW = predictedFit ? predictedFit.w * effectiveScale : 0
+  const predictedOutH = predictedFit ? predictedFit.h * effectiveScale : 0
+  const predictedTier = predictedFit ? getResolutionTierLabel(predictedOutW, predictedOutH) : ''
+  const predictedDims = predictedFit
+    ? `${predictedOutW} × ${predictedOutH}${predictedTier ? ` (${predictedTier})` : ''}${predictedFit.fitted ? ' • Auto-Fit' : ''}`
+    : null
+
+  const isMultiThreadReady =
+    typeof window !== 'undefined' && Boolean(window.crossOriginIsolated)
 
   return (
     <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
@@ -461,7 +535,7 @@ export function PhotoUpscalerTab({
                   Instant HD GPU
                 </span>
                 <span className="mt-1 text-[11px] opacity-80">
-                  0 MB download • 1–2 detik di HP &amp; Laptop
+                  EASU + RCAS • 0 MB • &lt; 1 detik di HP &amp; Laptop
                 </span>
               </button>
 
@@ -706,28 +780,42 @@ export function PhotoUpscalerTab({
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-violet-500"
                 >
                   <option value="auto">
-                    Auto ({caps.webgpu ? 'WebGPU → WASM' : 'WASM'})
+                    Auto ({caps.webgpu ? 'WebGPU → WASM' : isMultiThreadReady ? 'WASM Multi-Thread' : 'WASM'})
                   </option>
-                  <option value="wasm">WASM CPU (Stabil / Tanpa WebGPU)</option>
+                  <option value="wasm">
+                    WASM CPU ({isMultiThreadReady ? 'Multi-Thread SIMD' : 'Stabil / Tanpa WebGPU'})
+                  </option>
                 </select>
               </div>
             </div>
           )}
 
-          {/* Output Format */}
-          <div className="flex items-center justify-between gap-3 border-t border-zinc-800/80 pt-3">
-            <span className="text-xs text-zinc-400">Format Output</span>
-            <select
-              value={options.outputFormat}
-              onChange={(e) =>
-                setOptions((p) => ({ ...p, outputFormat: e.target.value as OutputImageFormat }))
-              }
-              className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-violet-500"
-            >
-              <option value="image/png">PNG (Lossless HD)</option>
-              <option value="image/webp">WebP (Ukuran Hemat)</option>
-              <option value="image/jpeg">JPEG (Kompatibel Semua)</option>
-            </select>
+          {/* Safe Auto-Fit & Output Format */}
+          <div className="space-y-2.5 border-t border-zinc-800/80 pt-3">
+            <label className="flex cursor-pointer items-center justify-between gap-2 text-xs text-zinc-300">
+              <span>Auto-Fit Foto Besar (Anti-Crash HP/Laptop)</span>
+              <input
+                type="checkbox"
+                checked={autoFitSafe}
+                onChange={(e) => setAutoFitSafe(e.target.checked)}
+                className="h-4 w-4 accent-violet-500"
+              />
+            </label>
+
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-zinc-400">Format Output</span>
+              <select
+                value={options.outputFormat}
+                onChange={(e) =>
+                  setOptions((p) => ({ ...p, outputFormat: e.target.value as OutputImageFormat }))
+                }
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-violet-500"
+              >
+                <option value="image/png">PNG (Lossless HD)</option>
+                <option value="image/webp">WebP (Cepat &amp; Hemat)</option>
+                <option value="image/jpeg">JPEG (Kompatibel Semua)</option>
+              </select>
+            </div>
           </div>
 
           {errorMsg && (

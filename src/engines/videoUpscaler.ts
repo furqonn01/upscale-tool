@@ -41,6 +41,13 @@ async function ensureVideoFrameReady(
   signal?: AbortSignal
 ): Promise<void> {
   if (video.readyState >= 2) return
+  if (video.readyState === 0) {
+    try {
+      video.load()
+    } catch {
+      // ignore load trigger errors
+    }
+  }
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup()

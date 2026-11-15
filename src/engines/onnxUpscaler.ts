@@ -110,25 +110,47 @@ async function hasWebGpuShaderF16(): Promise<boolean> {
   }
 }
 
-let sharedWorker: Worker | null = null
-
-function getOrCreateWorker(): Worker {
-  if (!sharedWorker) {
-    sharedWorker = new Worker(new URL('../workers/onnxWorker.ts', import.meta.url), {
-      type: 'module',
-    })
-  }
-  return sharedWorker
+interface WorkerSlot {
+  worker: Worker
+  loadedModelKey: string
+  modelByteLength: number
 }
 
-function resetWorker(): void {
-  if (sharedWorker) {
-    sharedWorker.terminate()
-    sharedWorker = null
+const workerPool: WorkerSlot[] = []
+
+function getOrCreateWorkerSlot(index: number): WorkerSlot {
+  while (workerPool.length <= index) {
+    workerPool.push({
+      worker: new Worker(new URL('../workers/onnxWorker.ts', import.meta.url), {
+        type: 'module',
+      }),
+      loadedModelKey: '',
+      modelByteLength: 0,
+    })
+  }
+  return workerPool[index]
+}
+
+function resetWorkerSlot(index: number): void {
+  const slot = workerPool[index]
+  if (slot) {
+    slot.worker.terminate()
+    slot.worker = new Worker(new URL('../workers/onnxWorker.ts', import.meta.url), {
+      type: 'module',
+    })
+    slot.loadedModelKey = ''
+    slot.modelByteLength = 0
+  }
+}
+
+function resetAllWorkers(): void {
+  for (let i = 0; i < workerPool.length; i++) {
+    resetWorkerSlot(i)
   }
 }
 
 interface WorkerInferenceArgs {
+  slotIndex: number
   modelKey: string
   modelBuffer?: ArrayBuffer
   srcRgba: ArrayBuffer
@@ -136,49 +158,23 @@ interface WorkerInferenceArgs {
   srcH: number
   tileSize: number
   preferWebGPU: boolean
+  isMobile: boolean
   fallbackScale: number
   wasmBaseUrl: string
+  tileOffset: number
+  tileStride: number
   suppressTileProgress?: boolean
   outCanvas: HTMLCanvasElement
-  tileOutCanvas: HTMLCanvasElement
+  getOutCtx: (totalW: number, totalH: number) => CanvasRenderingContext2D
   onProgress?: (p: ProgressInfo) => void
   signal?: AbortSignal
 }
 
-async function loadOnnxModelAsset(
-  modelSpec: OnnxModelSpec,
-  customModelFile: File | null | undefined,
-  preferWebGPU: boolean,
-  onProgress?: (p: ProgressInfo) => void,
-  signal?: AbortSignal
-): Promise<{ modelKey: string; modelBuffer: ArrayBuffer; canUseWebGpu: boolean }> {
-  const modelKey = customModelFile
-    ? `local:${customModelFile.name}:${customModelFile.size}`
-    : modelSpec.url
-
-  let modelBuffer: ArrayBuffer
-  if (customModelFile) {
-    onProgress?.({ percent: 8, stage: `Membaca model lokal ${customModelFile.name}...` })
-    modelBuffer = await customModelFile.arrayBuffer()
-  } else {
-    modelBuffer = await fetchModelBuffer(modelSpec.url, onProgress, signal)
-  }
-
-  if (signal?.aborted) throw new DOMException('Dibatalkan', 'AbortError')
-
-  let canUseWebGpu = preferWebGPU
-  if (canUseWebGpu && modelSpec.isFp16) {
-    canUseWebGpu = await hasWebGpuShaderF16()
-  }
-
-  return { modelKey, modelBuffer, canUseWebGpu }
-}
-
-async function runWorkerInference(
+function runWorkerInference(
   args: WorkerInferenceArgs
 ): Promise<{ provider: string; scale: number; totalW: number; totalH: number }> {
-  const worker = getOrCreateWorker()
-  let outCtx: CanvasRenderingContext2D | null = null
+  const slot = getOrCreateWorkerSlot(args.slotIndex)
+  const worker = slot.worker
 
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -189,7 +185,7 @@ async function runWorkerInference(
 
     const onAbort = () => {
       cleanup()
-      resetWorker()
+      resetAllWorkers()
       reject(new DOMException('Dibatalkan', 'AbortError'))
     }
 
@@ -197,7 +193,7 @@ async function runWorkerInference(
 
     worker.onerror = (ev) => {
       cleanup()
-      resetWorker()
+      resetWorkerSlot(args.slotIndex)
       reject(new Error(ev.message || 'Worker ONNX mengalami error'))
     }
 
@@ -208,38 +204,19 @@ async function runWorkerInference(
         return
       }
       if (msg.type === 'tile') {
-        if (!outCtx) {
-          if (args.outCanvas.width !== msg.totalW) args.outCanvas.width = msg.totalW
-          if (args.outCanvas.height !== msg.totalH) args.outCanvas.height = msg.totalH
-          outCtx = args.outCanvas.getContext('2d')
-          if (!outCtx) {
-            cleanup()
-            reject(new Error('Gagal membuat canvas output AI'))
-            return
-          }
-        }
-        const rgba = new Uint8ClampedArray(msg.tileRgba)
-        if (args.tileOutCanvas.width !== msg.validOutW) args.tileOutCanvas.width = msg.validOutW
-        if (args.tileOutCanvas.height !== msg.validOutH) args.tileOutCanvas.height = msg.validOutH
-        const tileOutCtx = args.tileOutCanvas.getContext('2d')
-        if (tileOutCtx && outCtx) {
-          tileOutCtx.putImageData(new ImageData(rgba, msg.validOutW, msg.validOutH), 0, 0)
-          outCtx.drawImage(
-            args.tileOutCanvas,
-            msg.cropX,
-            msg.cropY,
-            msg.swOut,
-            msg.shOut,
-            msg.dstX,
-            msg.dstY,
-            msg.swOut,
-            msg.shOut
-          )
+        try {
+          const outCtx = args.getOutCtx(msg.totalW, msg.totalH)
+          const rgba = new Uint8ClampedArray(msg.tileRgba)
+          outCtx.putImageData(new ImageData(rgba, msg.swOut, msg.shOut), msg.dstX, msg.dstY)
+        } catch (err) {
+          cleanup()
+          reject(err instanceof Error ? err : new Error('Gagal menulis tile output AI'))
         }
         return
       }
       if (msg.type === 'done') {
         cleanup()
+        slot.loadedModelKey = args.modelKey
         resolve({
           provider: msg.provider,
           scale: msg.scale,
@@ -250,6 +227,9 @@ async function runWorkerInference(
       }
       if (msg.type === 'error') {
         cleanup()
+        if (!args.modelBuffer) {
+          slot.loadedModelKey = ''
+        }
         reject(new Error(msg.message))
       }
     }
@@ -262,12 +242,18 @@ async function runWorkerInference(
       srcH: args.srcH,
       tileSize: args.tileSize,
       preferWebGPU: args.preferWebGPU,
+      isMobile: args.isMobile,
       fallbackScale: args.fallbackScale,
       wasmBaseUrl: args.wasmBaseUrl,
+      tileOffset: args.tileOffset,
+      tileStride: args.tileStride,
       suppressTileProgress: args.suppressTileProgress,
     }
     const transfers: Transferable[] = [args.srcRgba]
-    if (args.modelBuffer) transfers.push(args.modelBuffer)
+    if (args.modelBuffer) {
+      slot.modelByteLength = args.modelBuffer.byteLength
+      transfers.push(args.modelBuffer)
+    }
     worker.postMessage(req, transfers)
   })
 }
@@ -283,13 +269,9 @@ export async function upscaleImageWithOnnx(
   onProgress?: (p: ProgressInfo) => void,
   signal?: AbortSignal
 ): Promise<{ blob: Blob; width: number; height: number; provider: string; scale: number }> {
-  const { modelKey, modelBuffer, canUseWebGpu } = await loadOnnxModelAsset(
-    modelSpec,
-    customModelFile,
-    preferWebGPU,
-    onProgress,
-    signal
-  )
+  const modelKey = customModelFile
+    ? `local:${customModelFile.name}:${customModelFile.size}`
+    : modelSpec.url
 
   const srcW = bitmap.width
   const srcH = bitmap.height
@@ -299,9 +281,56 @@ export async function upscaleImageWithOnnx(
   const expectedOutH = srcH * modelSpec.scale
   if (expectedOutW > maxDim || expectedOutH > maxDim || expectedOutW * expectedOutH > maxPixels) {
     throw new Error(
-      `Ukuran hasil ${expectedOutW}×${expectedOutH} terlalu besar untuk memori canvas browser (${isMobile ? 'HP' : 'Laptop'}). Gunakan skala 2× atau kecilkan foto sumber terlebih dahulu.`
+      `Ukuran hasil ${expectedOutW}×${expectedOutH} terlalu besar untuk memori canvas browser (${isMobile ? 'HP' : 'Laptop'}). Gunakan skala 2× atau aktifkan Auto-Fit HP.`
     )
   }
+
+  let canUseWebGpu = preferWebGPU
+  if (canUseWebGpu && modelSpec.isFp16) {
+    canUseWebGpu = await hasWebGpuShaderF16()
+  }
+
+  const effectiveTileSize = modelSpec.scale >= 4 ? Math.min(tileSize, 192) : tileSize
+  const totalTiles = Math.ceil(srcW / effectiveTileSize) * Math.ceil(srcH / effectiveTileSize)
+  const isCrossOriginIsolated =
+    typeof window !== 'undefined' && Boolean(window.crossOriginIsolated)
+  const hwCores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 4 : 4
+
+  // When crossOriginIsolated is unavailable on a multi-core laptop, fan out WASM tiles across 2 workers for ~1.8x speedup
+  const slot0 = getOrCreateWorkerSlot(0)
+  const knownModelSize =
+    slot0.loadedModelKey === modelKey
+      ? slot0.modelByteLength
+      : customModelFile?.size ?? 0
+
+  const canUseDualWasmPool =
+    !isMobile &&
+    !canUseWebGpu &&
+    !isCrossOriginIsolated &&
+    hwCores >= 4 &&
+    totalTiles >= 4 &&
+    knownModelSize <= 25_000_000
+
+  let modelBuffer: ArrayBuffer | undefined
+  const needSlot0Buffer = slot0.loadedModelKey !== modelKey
+  const needSlot1Buffer =
+    canUseDualWasmPool && workerPool[1]?.loadedModelKey !== modelKey
+
+  if (needSlot0Buffer || needSlot1Buffer) {
+    if (customModelFile) {
+      onProgress?.({ percent: 8, stage: `Membaca model lokal ${customModelFile.name}...` })
+      modelBuffer = await customModelFile.arrayBuffer()
+    } else {
+      modelBuffer = await fetchModelBuffer(modelSpec.url, onProgress, signal)
+    }
+    if (signal?.aborted) throw new DOMException('Dibatalkan', 'AbortError')
+  } else {
+    onProgress?.({ percent: 18, stage: 'Menggunakan sesi model AI di memori...' })
+  }
+
+  const useDualWasm =
+    canUseDualWasmPool &&
+    ((modelBuffer ? modelBuffer.byteLength : knownModelSize) <= 25_000_000)
 
   const srcCanvas = document.createElement('canvas')
   srcCanvas.width = srcW
@@ -310,34 +339,106 @@ export async function upscaleImageWithOnnx(
   if (!srcCtx) throw new Error('Gagal membuat canvas sumber')
   srcCtx.drawImage(bitmap, 0, 0)
   const srcImgData = srcCtx.getImageData(0, 0, srcW, srcH)
+  // Release source canvas memory immediately (critical on mobile)
+  srcCanvas.width = 0
+  srcCanvas.height = 0
 
   const outCanvas = document.createElement('canvas')
-  const tileOutCanvas = document.createElement('canvas')
+  let outCtx: CanvasRenderingContext2D | null = null
+  const getOutCtx = (totalW: number, totalH: number): CanvasRenderingContext2D => {
+    if (!outCtx) {
+      if (outCanvas.width !== totalW) outCanvas.width = totalW
+      if (outCanvas.height !== totalH) outCanvas.height = totalH
+      outCtx = outCanvas.getContext('2d')
+      if (!outCtx) throw new Error('Gagal membuat canvas output AI')
+    }
+    return outCtx
+  }
+
   const wasmBaseUrl = new URL(`${import.meta.env.BASE_URL}ort/`, window.location.origin).href
 
-  const doneInfo = await runWorkerInference({
-    modelKey,
-    modelBuffer,
-    srcRgba: srcImgData.data.buffer,
-    srcW,
-    srcH,
-    tileSize,
-    preferWebGPU: canUseWebGpu,
-    fallbackScale: modelSpec.scale,
-    wasmBaseUrl,
-    outCanvas,
-    tileOutCanvas,
-    onProgress,
-    signal,
-  })
+  try {
+    let doneInfo: { provider: string; scale: number; totalW: number; totalH: number }
 
-  onProgress?.({ percent: 96, stage: 'Menyimpan hasil HD...' })
-  const blob = await canvasToBlob(outCanvas, outputFormat)
-  return {
-    blob,
-    width: doneInfo.totalW,
-    height: doneInfo.totalH,
-    provider: doneInfo.provider,
-    scale: doneInfo.scale,
+    if (useDualWasm) {
+      const srcCopy = srcImgData.data.buffer.slice(0)
+      const buf0 = needSlot0Buffer && modelBuffer ? modelBuffer.slice(0) : undefined
+      const buf1 = needSlot1Buffer && modelBuffer ? modelBuffer : undefined
+
+      const [res0] = await Promise.all([
+        runWorkerInference({
+          slotIndex: 0,
+          modelKey,
+          modelBuffer: buf0,
+          srcRgba: srcImgData.data.buffer,
+          srcW,
+          srcH,
+          tileSize,
+          preferWebGPU: false,
+          isMobile,
+          fallbackScale: modelSpec.scale,
+          wasmBaseUrl,
+          tileOffset: 0,
+          tileStride: 2,
+          outCanvas,
+          getOutCtx,
+          onProgress,
+          signal,
+        }),
+        runWorkerInference({
+          slotIndex: 1,
+          modelKey,
+          modelBuffer: buf1,
+          srcRgba: srcCopy,
+          srcW,
+          srcH,
+          tileSize,
+          preferWebGPU: false,
+          isMobile,
+          fallbackScale: modelSpec.scale,
+          wasmBaseUrl,
+          tileOffset: 1,
+          tileStride: 2,
+          suppressTileProgress: true,
+          outCanvas,
+          getOutCtx,
+          signal,
+        }),
+      ])
+      doneInfo = res0
+    } else {
+      doneInfo = await runWorkerInference({
+        slotIndex: 0,
+        modelKey,
+        modelBuffer: needSlot0Buffer ? modelBuffer : undefined,
+        srcRgba: srcImgData.data.buffer,
+        srcW,
+        srcH,
+        tileSize,
+        preferWebGPU: canUseWebGpu,
+        isMobile,
+        fallbackScale: modelSpec.scale,
+        wasmBaseUrl,
+        tileOffset: 0,
+        tileStride: 1,
+        outCanvas,
+        getOutCtx,
+        onProgress,
+        signal,
+      })
+    }
+
+    onProgress?.({ percent: 96, stage: 'Menyimpan hasil HD...' })
+    const blob = await canvasToBlob(outCanvas, outputFormat)
+    return {
+      blob,
+      width: doneInfo.totalW,
+      height: doneInfo.totalH,
+      provider: doneInfo.provider,
+      scale: doneInfo.scale,
+    }
+  } finally {
+    outCanvas.width = 0
+    outCanvas.height = 0
   }
 }

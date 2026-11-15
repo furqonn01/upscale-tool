@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hd-local-studio-v1'
+const CACHE_NAME = 'hd-local-studio-v2'
 const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg']
 
 self.addEventListener('install', (event) => {
@@ -29,6 +29,22 @@ self.addEventListener('fetch', (event) => {
   // Only cache same-origin static assets; never intercept external API calls or localhost gateways like 9Router
   if (url.origin !== self.location.origin) return
   if (url.pathname.startsWith('/api')) return
+
+  // Network-first for HTML navigation so mobile/laptop always gets latest app shell
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const clone = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone)).catch(() => undefined)
+          }
+          return response
+        })
+        .catch(() => caches.match(request).then((c) => c || caches.match('/index.html')))
+    )
+    return
+  }
 
   event.respondWith(
     caches.match(request).then((cached) => {

@@ -9,9 +9,13 @@ export function detectDeviceCapabilities(): DeviceCapabilities {
   const isTouch =
     typeof window !== 'undefined' &&
     ('ontouchstart' in window || navigator.maxTouchPoints > 0)
+  const isCoarsePointer =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(pointer: coarse)').matches
   const isMobile =
     /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
-    (isTouch && typeof window !== 'undefined' && window.innerWidth < 820)
+    (isCoarsePointer && typeof window !== 'undefined' && window.innerWidth < 1024)
 
   let webgl2 = false
   let maxTextureSize = 4096
@@ -66,13 +70,13 @@ export function getPresetSettings(preset: RestorationPreset): Pick<
 > {
   switch (preset) {
     case 'photo-burik':
-      return { denoise: 55, deblock: 65, sharpen: 68, clarity: 42 }
+      return { denoise: 42, deblock: 58, sharpen: 76, clarity: 46 }
     case 'anime':
-      return { denoise: 62, deblock: 70, sharpen: 84, clarity: 35 }
+      return { denoise: 52, deblock: 65, sharpen: 88, clarity: 38 }
     case 'portrait-soft':
-      return { denoise: 60, deblock: 50, sharpen: 45, clarity: 28 }
+      return { denoise: 54, deblock: 45, sharpen: 56, clarity: 32 }
     case 'sharp-text':
-      return { denoise: 35, deblock: 55, sharpen: 92, clarity: 55 }
+      return { denoise: 22, deblock: 42, sharpen: 94, clarity: 58 }
   }
 }
 
