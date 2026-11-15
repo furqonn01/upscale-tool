@@ -86,7 +86,7 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
     sharpen: 65,
     clarity: 38,
     maxHeight: caps.isMobile ? 720 : 1080,
-    targetFps: 30,
+    targetFps: 'source',
     pipeline: 'auto',
     includeAudio: true,
   }))
@@ -160,10 +160,13 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
         (frameCanvas) => {
           const targetCanvas = previewCanvasRef.current
           if (!targetCanvas) return
-          if (targetCanvas.width !== frameCanvas.width) targetCanvas.width = frameCanvas.width
-          if (targetCanvas.height !== frameCanvas.height) targetCanvas.height = frameCanvas.height
+          const scalePreview = Math.min(1, 640 / Math.max(frameCanvas.width, frameCanvas.height))
+          const pw = Math.max(1, Math.round(frameCanvas.width * scalePreview))
+          const ph = Math.max(1, Math.round(frameCanvas.height * scalePreview))
+          if (targetCanvas.width !== pw) targetCanvas.width = pw
+          if (targetCanvas.height !== ph) targetCanvas.height = ph
           const ctx = targetCanvas.getContext('2d')
-          ctx?.drawImage(frameCanvas, 0, 0)
+          ctx?.drawImage(frameCanvas, 0, 0, pw, ph)
         },
         controller.signal
       )
@@ -421,10 +424,10 @@ export function VideoUpscalerTab({ caps, onGalleryUpdated }: VideoUpscalerTabPro
                 }}
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 outline-none focus:border-sky-500"
               >
+                <option value="source">Ikuti FPS Asli (Tercepat & Halus)</option>
                 <option value={24}>24 fps (Sinematik)</option>
                 <option value={30}>30 fps (Standar)</option>
                 <option value={60}>60 fps (Halus)</option>
-                <option value="source">Default (~30 fps)</option>
               </select>
             </div>
 

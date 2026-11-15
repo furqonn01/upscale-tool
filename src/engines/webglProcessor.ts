@@ -74,17 +74,21 @@ void main() {
   // Recombine crisp luma with smoothed chroma to kill JPEG color blocking without blurring edges
   vec3 denoised = clamp(cleanChromaRgb + vec3(cleanY - cleanChromaY), 0.0, 1.0);
 
-  // Targeted 2-texel cross deblock ONLY on flat regions (high-contrast edges remain untouched)
+  // Targeted 8-tap wide deblock on flat & gradient regions (kills 4x4/8x8 macroblock grids cleanly while keeping crisp edges intact)
   float localRange = maxY - minY;
-  float flatMask = smoothstep(0.16, 0.015, localRange) * uDeblock;
+  float flatMask = smoothstep(0.20, 0.018, localRange) * uDeblock;
   if (flatMask > 0.005) {
-    vec3 w0 = texture(uTex, clamp(vUv + vec2(-2.0, 0.0) * uTexelSize, 0.0, 1.0)).rgb;
-    vec3 w1 = texture(uTex, clamp(vUv + vec2( 2.0, 0.0) * uTexelSize, 0.0, 1.0)).rgb;
-    vec3 w2 = texture(uTex, clamp(vUv + vec2(0.0, -2.0) * uTexelSize, 0.0, 1.0)).rgb;
-    vec3 w3 = texture(uTex, clamp(vUv + vec2(0.0,  2.0) * uTexelSize, 0.0, 1.0)).rgb;
-    vec3 wideAvg = (w0 + w1 + w2 + w3) * 0.25;
+    vec3 w0 = texture(uTex, clamp(vUv + vec2(-2.0,  0.0) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w1 = texture(uTex, clamp(vUv + vec2( 2.0,  0.0) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w2 = texture(uTex, clamp(vUv + vec2( 0.0, -2.0) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w3 = texture(uTex, clamp(vUv + vec2( 0.0,  2.0) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w4 = texture(uTex, clamp(vUv + vec2(-1.5, -1.5) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w5 = texture(uTex, clamp(vUv + vec2( 1.5, -1.5) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w6 = texture(uTex, clamp(vUv + vec2(-1.5,  1.5) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 w7 = texture(uTex, clamp(vUv + vec2( 1.5,  1.5) * uTexelSize, 0.0, 1.0)).rgb;
+    vec3 wideAvg = (w0 + w1 + w2 + w3 + (w4 + w5 + w6 + w7) * 0.75) / 7.0;
     float wideDiff = abs(luma(wideAvg) - cleanY);
-    float blockWeight = flatMask * smoothstep(0.12, 0.008, wideDiff) * 0.42;
+    float blockWeight = flatMask * smoothstep(0.14, 0.008, wideDiff) * 0.65;
     denoised = mix(denoised, wideAvg, blockWeight);
   }
 
@@ -272,9 +276,9 @@ void main() {
   float maxLobe = mix(0.0, 0.21, uSharpen);
   float weight = clamp(lobe, -maxLobe, 0.0);
 
-  // Noise suppression: slightly attenuate sharpening on near-zero micro-noise
+  // Noise suppression: avoid re-sharpening faint H.264/JPEG macroblock edges while keeping crisp contours sharp
   float contrastSpan = mx4L - mn4L;
-  weight *= smoothstep(0.005, 0.04, contrastSpan);
+  weight *= smoothstep(0.015, 0.075, contrastSpan);
 
   vec3 rcas = (e + weight * (n + s + w + r)) / max(1.0 + 4.0 * weight, 0.08);
   rcas = clamp(rcas, 0.0, 1.0);
