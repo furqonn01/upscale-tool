@@ -62,6 +62,7 @@ export function YouTubeVideoPlayer({
   const videoRef = useRef<HTMLVideoElement>(null)
   const compareVideoRef = useRef<HTMLVideoElement>(null)
   const progressBarRef = useRef<HTMLDivElement>(null)
+  const volumeBarRef = useRef<HTMLDivElement>(null)
   const hideTimerRef = useRef<number | null>(null)
   const clickTimerRef = useRef<number | null>(null)
   const seekFeedbackTimerRef = useRef<number | null>(null)
@@ -86,10 +87,12 @@ export function YouTubeVideoPlayer({
   const [viewMode, setViewMode] = useState<CompareViewMode>('after')
   const [splitPos, setSplitPos] = useState(50)
   const [draggingSplit, setDraggingSplit] = useState(false)
+  const [draggingVolume, setDraggingVolume] = useState(false)
 
   const hasCompare = Boolean(compareSrc)
   const activeMode: CompareViewMode = hasCompare ? viewMode : 'after'
-  const showControls = !playing || settingsOpen || scrubbing || controlsVisible
+  const effectiveVolume = muted ? 0 : volume
+  const showControls = !playing || settingsOpen || scrubbing || draggingVolume || controlsVisible
   const canPiP =
     !compact && typeof document !== 'undefined' && Boolean(document.pictureInPictureEnabled)
 
@@ -397,6 +400,14 @@ export function YouTubeVideoPlayer({
     setSplitPos(Math.max(4, Math.min(96, pct)))
   }
 
+  const updateVolumeFromClientX = (clientX: number) => {
+    const bar = volumeBarRef.current
+    if (!bar) return
+    const rect = bar.getBoundingClientRect()
+    const ratio = rect.width > 0 ? Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) : 0
+    changeVolume(Math.round(ratio * 20) / 20)
+  }
+
   const activeVideoSrc = activeMode === 'before' && compareSrc ? compareSrc : src
   const playedPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0
   const bufferedPct = duration > 0 ? Math.min(100, (bufferedEnd / duration) * 100) : 0
@@ -407,7 +418,9 @@ export function YouTubeVideoPlayer({
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onMouseMove={revealControls}
-      onMouseLeave={() => playing && !settingsOpen && setControlsVisible(false)}
+      onMouseLeave={() =>
+        playing && !settingsOpen && !scrubbing && !draggingVolume && setControlsVisible(false)
+      }
       className={`group/yt relative select-none overflow-hidden bg-black outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${
         isFullscreen ? 'flex h-full w-full items-center justify-center' : 'aspect-video w-full'
       } ${className}`}
@@ -731,7 +744,7 @@ export function YouTubeVideoPlayer({
             )}
 
             {/* Volume group */}
-            <div className="group/vol flex items-center gap-1">
+            <div className="group/vol flex items-center">
               <button
                 type="button"
                 onClick={toggleMute}
@@ -747,16 +760,65 @@ export function YouTubeVideoPlayer({
                 )}
               </button>
               {!compact && (
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={muted ? 0 : volume}
-                  onChange={(e) => changeVolume(Number(e.target.value))}
-                  aria-label="Volume"
-                  className="hidden h-1 w-0 cursor-pointer accent-white transition-all duration-150 group-hover/vol:w-16 sm:block focus:w-16"
-                />
+                <div
+                  className={`hidden items-center overflow-hidden transition-all duration-200 sm:flex ${
+                    draggingVolume
+                      ? 'mr-1.5 w-[72px] opacity-100'
+                      : 'w-0 opacity-0 group-hover/vol:mr-1.5 group-hover/vol:w-[72px] group-hover/vol:opacity-100 group-focus-within/vol:mr-1.5 group-focus-within/vol:w-[72px] group-focus-within/vol:opacity-100'
+                  }`}
+                >
+                  <div
+                    ref={volumeBarRef}
+                    role="slider"
+                    tabIndex={0}
+                    aria-label="Volume"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(effectiveVolume * 100)}
+                    onPointerDown={(e) => {
+                      e.stopPropagation()
+                      e.currentTarget.setPointerCapture(e.pointerId)
+                      setDraggingVolume(true)
+                      updateVolumeFromClientX(e.clientX)
+                    }}
+                    onPointerMove={(e) => {
+                      if (!draggingVolume) return
+                      e.stopPropagation()
+                      updateVolumeFromClientX(e.clientX)
+                    }}
+                    onPointerUp={(e) => {
+                      if (!draggingVolume) return
+                      e.currentTarget.releasePointerCapture(e.pointerId)
+                      setDraggingVolume(false)
+                      scheduleHideControls()
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        changeVolume(volume + 0.1)
+                      } else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        changeVolume(volume - 0.1)
+                      }
+                    }}
+                    className="relative flex h-6 w-full cursor-pointer items-center px-1.5 touch-none outline-none"
+                  >
+                    <div className="relative h-1 w-full rounded-full bg-white/30">
+                      <div
+                        style={{ width: `${effectiveVolume * 100}%` }}
+                        className="absolute inset-y-0 left-0 rounded-full bg-white"
+                      />
+                      <div
+                        style={{ left: `${effectiveVolume * 100}%` }}
+                        className={`absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white shadow transition-transform ${
+                          draggingVolume ? 'scale-115' : 'scale-100'
+                        }`}
+                      />
+                    </div>
+                  </div>
+                </div>
               )}
             </div>
 
